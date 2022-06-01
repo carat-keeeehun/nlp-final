@@ -121,4 +121,7 @@ def run_train(*, config, experiment_dir,
 
 
 if __name__ == '__main__':
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+
     entry_point.run(train=run_train)

@@ -61,4 +61,7 @@ class MainTest(absltest.TestCase):
 
 
 if __name__ == '__main__':
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+
     absltest.main()

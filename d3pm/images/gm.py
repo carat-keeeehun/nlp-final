@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 import ml_collections
 import numpy as onp
+import optax
 import tensorflow.compat.v2 as tf
 
 import datasets
@@ -37,7 +38,7 @@ import utils
 @flax.struct.dataclass
 class TrainState:
     step: int
-    optimizer: flax.optim.Optimizer
+    optimizer: Any
     ema_params: Any
 
 
@@ -154,8 +155,7 @@ class TrainableModel:
                         jnp.all(jnp.isfinite(p)) for p in jax.tree_leaves(new_optimizer)
                     ]))
                 new_state_no_update = state.replace(step=step + 1)
-                state = jax.tree_multimap(lambda a, b: jnp.where(ok, a, b), new_state,
-                                        new_state_no_update)
+                state = jax.tree_map(lambda a, b: jnp.where(ok, a, b), new_state, new_state_no_update)
             else:
                 logging.info('Update skipping disabled')
                 state = new_state
@@ -182,16 +182,16 @@ class TrainableModel:
             optimizer_kwargs['weight_decay'] = config.train.weight_decay
 
         if config.train.optimizer == 'adam':
-            optimizer_def = flax.optim.Adam(
+            optimizer_def = optax.adam(
                 **optimizer_kwargs,
-                beta1=config.train.get('adam_beta1', 0.9),
-                beta2=config.train.get('adam_beta2', 0.999))
+                b1=config.train.get('adam_beta1', 0.9),
+                b2=config.train.get('adam_beta2', 0.999))
         elif config.train.optimizer == 'momentum':
-            optimizer_def = flax.optim.Momentum(
-                **optimizer_kwargs, beta=config.train.optimizer_beta)
+            optimizer_def = optax.sgd(
+                **optimizer_kwargs, momentum=config.train.optimizer_beta)
         elif config.train.optimizer == 'nesterov':
-            optimizer_def = flax.optim.Momentum(
-                **optimizer_kwargs, beta=config.train.optimizer_beta, nesterov=True)
+            optimizer_def = optax.sgd(
+                **optimizer_kwargs, momentum=config.train.optimizer_beta, nesterov=True)
         else:
             raise NotImplementedError(f'Unknown optimizer: {config.train.optimizer}')
 
@@ -274,8 +274,8 @@ class TrainableModel:
 
         # Logging setup
         writer = metric_writers.create_default_writer(
-            work_unit_dir, just_logging=jax.host_id() > 0)
-        if jax.host_id() == 0:
+            work_unit_dir, just_logging=jax.process_index() > 0)
+        if jax.process_index() == 0:
             utils.write_config_json(config, os.path.join(work_unit_dir, 'config.json'))
 
         # Build input pipeline
@@ -291,8 +291,8 @@ class TrainableModel:
             repeat=True,
             shuffle=True,
             augment=True,
-            shard_id=jax.host_id(),
-            num_shards=jax.host_count())
+            shard_id=jax.process_index(),
+            num_shards=jax.process_count())
         train_iter = utils.numpy_iter(train_ds)
         eval_ds = self.dataset.get_tf_dataset(
             split='eval',
@@ -301,8 +301,8 @@ class TrainableModel:
             repeat=True,
             shuffle=True,
             augment=False,
-            shard_id=jax.host_id(),
-            num_shards=jax.host_count())
+            shard_id=jax.process_index(),
+            num_shards=jax.process_count())
         eval_iter = utils.numpy_iter(eval_ds)
 
         samples_shape = (device_bs, *self.dataset.data_shape)
@@ -400,7 +400,7 @@ class TrainableModel:
                 else:
                     should_ckpt = False
 
-                if should_ckpt and jax.host_id() == 0:
+                if should_ckpt and jax.process_index() == 0:
                     checkpoints.save_checkpoint(
                         checkpoint_dir,
                         flax.jax_utils.unreplicate(state),
@@ -413,7 +413,7 @@ class TrainableModel:
                 if (('retain_checkpoint_every_steps' in config.train) and
                     ((new_step % config.train.retain_checkpoint_every_steps == 0) or
                     (new_step == config.train.num_train_steps)) and
-                    (jax.host_id() == 0)):
+                    (jax.process_index() == 0)):
                     # Below, overwrite=True because training might resume from a
                     # checkpoint from an earlier step than the latest retained checkpoint,
                     # causing the latest retained checkpoint to be overwritten.
