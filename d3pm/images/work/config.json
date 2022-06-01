@@ -1,0 +1,56 @@
+{
+    "dataset": {
+        "args": {
+            "class_conditional": false,
+            "randflip": true
+        },
+        "name": "CIFAR10"
+    },
+    "model": {
+        "args": {
+            "attn_resolutions": [
+                16
+            ],
+            "ch": 128,
+            "ch_mult": [
+                1,
+                2,
+                2,
+                2
+            ],
+            "dropout": 0.1,
+            "model_output": "logistic_pars",
+            "num_heads": 1,
+            "num_res_blocks": 2,
+            "out_ch": 3
+        },
+        "diffusion_betas": {
+            "num_timesteps": 1000,
+            "start": 0.0001,
+            "stop": 0.02,
+            "type": "linear"
+        },
+        "hybrid_coeff": 0.001,
+        "loss_type": "hybrid",
+        "model_prediction": "x_start",
+        "name": "unet0",
+        "transition_bands": null,
+        "transition_mat_type": "gaussian"
+    },
+    "seed": 0,
+    "train": {
+        "batch_size": 128,
+        "checkpoint_every_secs": 900,
+        "ema_decay": 0.9999,
+        "eval_every_steps": 50000,
+        "grad_clip": 1.0,
+        "learning_rate": 0.0002,
+        "learning_rate_warmup_steps": 0,
+        "log_loss_every_steps": 1000,
+        "num_train_steps": 1500000,
+        "optimizer": "adam",
+        "retain_checkpoint_every_steps": 100000,
+        "substeps": 10,
+        "weight_decay": 0.0
+    }
+}

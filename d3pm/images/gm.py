@@ -38,7 +38,7 @@ import utils
 @flax.struct.dataclass
 class TrainState:
     step: int
-    optimizer: Any
+    optimizer: flax.optim.Optimizer
     ema_params: Any
 
 
@@ -182,16 +182,16 @@ class TrainableModel:
             optimizer_kwargs['weight_decay'] = config.train.weight_decay
 
         if config.train.optimizer == 'adam':
-            optimizer_def = optax.adam(
+            optimizer_def = flax.optim.Adam(
                 **optimizer_kwargs,
-                b1=config.train.get('adam_beta1', 0.9),
-                b2=config.train.get('adam_beta2', 0.999))
+                beta1=config.train.get('adam_beta1', 0.9),
+                beta2=config.train.get('adam_beta2', 0.999))
         elif config.train.optimizer == 'momentum':
-            optimizer_def = optax.sgd(
-                **optimizer_kwargs, momentum=config.train.optimizer_beta)
+            optimizer_def = flax.optim.Momentum(
+                **optimizer_kwargs, beta=config.train.optimizer_beta)
         elif config.train.optimizer == 'nesterov':
-            optimizer_def = optax.sgd(
-                **optimizer_kwargs, momentum=config.train.optimizer_beta, nesterov=True)
+            optimizer_def = flax.optim.Momentum(
+                **optimizer_kwargs, beta=config.train.optimizer_beta, nesterov=True)
         else:
             raise NotImplementedError(f'Unknown optimizer: {config.train.optimizer}')
 
