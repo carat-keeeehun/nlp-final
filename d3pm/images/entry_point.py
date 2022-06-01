@@ -44,67 +44,66 @@ config_flags.DEFINE_config_file('config', lock_config=False)
 
 
 def main(executable_dict, argv):
-  del argv
+    del argv
 
+    work_unit = platform.work_unit()
+    tf.enable_v2_behavior()
+    # Hide any GPUs form TensorFlow. Otherwise TF might reserve memory and make
+    # it unavailable to JAX.
+    tf.config.experimental.set_visible_devices([], 'GPU')
 
-  work_unit = platform.work_unit()
-  tf.enable_v2_behavior()
-  # Hide any GPUs form TensorFlow. Otherwise TF might reserve memory and make
-  # it unavailable to JAX.
-  tf.config.experimental.set_visible_devices([], 'GPU')
+    logging.info('JAX host: %d / %d', jax.host_id(), jax.host_count())
+    logging.info('JAX devices: %r', jax.devices())
 
-  logging.info('JAX host: %d / %d', jax.host_id(), jax.host_count())
-  logging.info('JAX devices: %r', jax.devices())
+    work_unit.set_task_status(
+        f'host_id: {jax.host_id()}, host_count: {jax.host_count()}')
 
-  work_unit.set_task_status(
-      f'host_id: {jax.host_id()}, host_count: {jax.host_count()}')
+    # Read configuration
+    if FLAGS.config_json:
+        logging.info('Reading config from JSON: %s', FLAGS.config_json)
+        with tf.io.gfile.GFile(FLAGS.config_json, 'r') as f:
+            config = ml_collections.ConfigDict(json.loads(f.read()))
+    else:
+        config = FLAGS.config
+    logging.info('config=%s',
+                config.to_json_best_effort(indent=4, sort_keys=True))
 
-  # Read configuration
-  if FLAGS.config_json:
-    logging.info('Reading config from JSON: %s', FLAGS.config_json)
-    with tf.io.gfile.GFile(FLAGS.config_json, 'r') as f:
-      config = ml_collections.ConfigDict(json.loads(f.read()))
-  else:
-    config = FLAGS.config
-  logging.info('config=%s',
-               config.to_json_best_effort(indent=4, sort_keys=True))
+    # Make output directories
+    if FLAGS.experiment_dir:
+        work_unit.create_artifact(platform.ArtifactType.DIRECTORY,
+                                FLAGS.experiment_dir, 'experiment_dir')
+    if FLAGS.work_unit_dir:
+        work_unit.create_artifact(platform.ArtifactType.DIRECTORY,
+                                FLAGS.work_unit_dir, 'work_unit_dir')
+    logging.info('experiment_dir=%s work_unit_dir=%s', FLAGS.experiment_dir,
+                FLAGS.work_unit_dir)
 
-  # Make output directories
-  if FLAGS.experiment_dir:
-    work_unit.create_artifact(platform.ArtifactType.DIRECTORY,
-                              FLAGS.experiment_dir, 'experiment_dir')
-  if FLAGS.work_unit_dir:
-    work_unit.create_artifact(platform.ArtifactType.DIRECTORY,
-                              FLAGS.work_unit_dir, 'work_unit_dir')
-  logging.info('experiment_dir=%s work_unit_dir=%s', FLAGS.experiment_dir,
-               FLAGS.work_unit_dir)
+    # Seeding
+    random.seed(config.seed * jax.host_count() + jax.host_id())
+    onp.random.seed(config.seed * jax.host_count() + jax.host_id())
+    rng = utils.RngGen(
+        jax.random.fold_in(jax.random.PRNGKey(config.seed), jax.host_id()))
 
-  # Seeding
-  random.seed(config.seed * jax.host_count() + jax.host_id())
-  onp.random.seed(config.seed * jax.host_count() + jax.host_id())
-  rng = utils.RngGen(
-      jax.random.fold_in(jax.random.PRNGKey(config.seed), jax.host_id()))
+    # Run the main function
+    logging.info('Running executable: %s', FLAGS.executable_name)
 
-  # Run the main function
-  logging.info('Running executable: %s', FLAGS.executable_name)
+    extra_args = {}
+    if FLAGS.extra_args_json_str:
+        extra_args = json.loads(FLAGS.extra_args_json_str)
+        logging.info('Extra args passed in: %r', extra_args)
 
-  extra_args = {}
-  if FLAGS.extra_args_json_str:
-    extra_args = json.loads(FLAGS.extra_args_json_str)
-    logging.info('Extra args passed in: %r', extra_args)
+    executable_dict[FLAGS.executable_name](
+        config=config,
+        experiment_dir=FLAGS.experiment_dir,
+        work_unit_dir=FLAGS.work_unit_dir,
+        rng=rng,
+        **extra_args)
 
-  executable_dict[FLAGS.executable_name](
-      config=config,
-      experiment_dir=FLAGS.experiment_dir,
-      work_unit_dir=FLAGS.work_unit_dir,
-      rng=rng,
-      **extra_args)
-
-  utils.barrier()
+    utils.barrier()
 
 
 def run(**executable_dict):
-  # JAX uses a different flags library -- parse from absl so that the task
-  # knows its task_id for pod training.
-  jax_config.config_with_absl()
-  app.run(functools.partial(main, executable_dict))
+    # JAX uses a different flags library -- parse from absl so that the task
+    # knows its task_id for pod training.
+    jax_config.config_with_absl()
+    app.run(functools.partial(main, executable_dict))

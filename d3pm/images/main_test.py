@@ -29,38 +29,36 @@ from d3pm.images import utils
 
 
 class MainTest(absltest.TestCase):
+    def test_small_training_job(self):
+        experiment_dir = self.create_tempdir().full_path
+        work_unit_dir = self.create_tempdir().full_path
 
-  def test_small_training_job(self):
-    experiment_dir = self.create_tempdir().full_path
-    work_unit_dir = self.create_tempdir().full_path
+        # Disable compiler optimizations for faster compile time.
+        jax.config.update('jax_disable_most_optimizations', True)
 
-    # Disable compiler optimizations for faster compile time.
-    jax.config.update('jax_disable_most_optimizations', True)
+        # Seed the random number generators.
+        random.seed(0)
+        onp.random.seed(0)
+        rng = utils.RngGen(jax.random.PRNGKey(0))
 
-    # Seed the random number generators.
-    random.seed(0)
-    onp.random.seed(0)
-    rng = utils.RngGen(jax.random.PRNGKey(0))
+        # Construct a test config with a small number of steps.
+        config = main_test_config.get_config()
 
-    # Construct a test config with a small number of steps.
-    config = main_test_config.get_config()
+        # Patch normalization so that we don't try to apply GroupNorm with more
+        # groups than test channels.
+        orig_normalize = model.Normalize
+        try:
+            model.Normalize = nn.LayerNorm
 
-    # Patch normalization so that we don't try to apply GroupNorm with more
-    # groups than test channels.
-    orig_normalize = model.Normalize
-    try:
-      model.Normalize = nn.LayerNorm
-
-      # Make sure we can train without any exceptions.
-      main.run_train(
-          config=config,
-          experiment_dir=experiment_dir,
-          work_unit_dir=work_unit_dir,
-          rng=rng)
-
-    finally:
-      model.Normalize = orig_normalize
+            # Make sure we can train without any exceptions.
+            main.run_train(
+                config=config,
+                experiment_dir=experiment_dir,
+                work_unit_dir=work_unit_dir,
+                rng=rng)
+        finally:
+            model.Normalize = orig_normalize
 
 
 if __name__ == '__main__':
-  absltest.main()
+    absltest.main()
