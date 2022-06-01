@@ -1,2 +1,2 @@
-# nlp-final
+# NLP-final
 D3PM
