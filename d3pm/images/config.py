@@ -59,7 +59,7 @@ def get_config():
             # 'gaussian','uniform','absorbing'
             transition_mat_type='gaussian',
             transition_bands=None,
-            loss_type='hybrid',  # kl,cross_entropy_x_start, hybrid
+            loss_type='hybrid',  # kl, cross_entropy_x_start, hybrid
             hybrid_coeff=0.001,  # only used for hybrid loss type.
         ),
         train=config_dict(

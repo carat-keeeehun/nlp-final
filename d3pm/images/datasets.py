@@ -26,7 +26,7 @@ import jax.numpy as jnp
 import tensorflow.compat.v2 as tf
 import tensorflow_datasets as tfds
 
-from d3pm.images import utils
+import utils
 
 
 def batch_dataset(dataset, batch_shape):

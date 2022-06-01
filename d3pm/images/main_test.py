@@ -22,10 +22,10 @@ from flax import linen as nn
 import jax
 import numpy as onp
 
-from d3pm.images import main
-from d3pm.images import main_test_config
-from d3pm.images import model
-from d3pm.images import utils
+import main
+import main_test_config
+import model
+import utils
 
 
 class MainTest(absltest.TestCase):

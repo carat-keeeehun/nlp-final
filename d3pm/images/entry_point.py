@@ -31,7 +31,7 @@ from ml_collections.config_flags import config_flags
 import numpy as onp
 import tensorflow.compat.v2 as tf
 
-from d3pm.images import utils
+import utils
 
 
 FLAGS = flags.FLAGS

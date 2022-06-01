@@ -30,8 +30,8 @@ import ml_collections
 import numpy as onp
 import tensorflow.compat.v2 as tf
 
-from d3pm.images import datasets
-from d3pm.images import utils
+import datasets
+import utils
 
 
 @flax.struct.dataclass

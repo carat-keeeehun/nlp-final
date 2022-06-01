@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 
-from d3pm.images import utils
+import utils
 
 nonlinearity = nn.swish
 Normalize = nn.normalization.GroupNorm

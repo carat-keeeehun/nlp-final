@@ -19,11 +19,11 @@ from typing import Dict
 import jax.numpy as jnp
 import ml_collections
 
-from d3pm.images import entry_point
-from d3pm.images import gm
-from d3pm.images import model
-from d3pm.images import utils
-from d3pm.images.diffusion_categorical import make_diffusion
+import entry_point
+import gm
+import model
+import utils
+from diffusion_categorical import make_diffusion
 
 
 class Cifar10DiffusionModel(gm.TrainableModel):
