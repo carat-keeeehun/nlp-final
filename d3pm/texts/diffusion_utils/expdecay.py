@@ -22,15 +22,14 @@ optim_choices = {'sgd', 'adam', 'adamax'}
 
 
 def add_optim_args(parser):
-
     # Model params
     parser.add_argument('--optimizer', type=str, default='adam', choices=optim_choices)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--warmup', type=int, default=None)
     parser.add_argument('--update_freq', type=int, default=1)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--momentum_sqr', type=float, default=0.999)
-    parser.add_argument('--gamma', type=float, default=0.995)
+    parser.add_argument('--gamma', type=float, default=0.99)
 
 
 def get_optim_id(args):

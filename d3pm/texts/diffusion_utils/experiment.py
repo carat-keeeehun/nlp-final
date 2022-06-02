@@ -4,8 +4,6 @@ from diffusion_utils.utils import get_args_table, clean_dict
 # Path
 import os
 import time
-import pathlib
-HOME = str(pathlib.Path.home())
 
 # Experiment
 from diffusion_utils import BaseExperiment
@@ -17,9 +15,8 @@ import wandb
 
 
 def add_exp_args(parser):
-
     # Train params
-    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--epochs', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--parallel', type=str, default=None, choices={'dp'})
@@ -28,11 +25,13 @@ def add_exp_args(parser):
     # Logging params
     parser.add_argument('--name', type=str, default=None)
     parser.add_argument('--project', type=str, default=None)
-    parser.add_argument('--eval_every', type=int, default=None)
-    parser.add_argument('--check_every', type=int, default=None)
-    parser.add_argument('--log_tb', type=eval, default=True)
+    parser.add_argument('--eval_every', type=int, default=2)
+    parser.add_argument('--check_every', type=int, default=20)
+    parser.add_argument('--log_tb', type=eval, default=False)
     parser.add_argument('--log_wandb', type=eval, default=True)
     parser.add_argument('--log_home', type=str, default=None)
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = "4, 5, 6, 7"
 
 
 class DiffusionExperiment(BaseExperiment):
@@ -47,7 +46,7 @@ class DiffusionExperiment(BaseExperiment):
                  train_loader, eval_loader,
                  model, optimizer, scheduler_iter, scheduler_epoch):
         if args.log_home is None:
-            self.log_base = os.path.join(HOME, 'log', 'flow')
+            self.log_base = "logs"
         else:
             self.log_base = os.path.join(args.log_home, 'log', 'flow')
 

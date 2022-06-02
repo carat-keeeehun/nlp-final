@@ -6,13 +6,12 @@ from .dataset_enwik8 import EnWik8Dataset
 dataset_choices = {'text8_256', 'enwik8_blocksparse'}
 
 def add_data_args(parser):
-
     # Data params
     parser.add_argument('--dataset', type=str, default='text8_256', choices=dataset_choices)
     parser.add_argument('--validation', type=eval, default=True)
 
     # Train params
-    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--pin_memory', type=eval, default=False)
 

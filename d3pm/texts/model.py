@@ -16,7 +16,6 @@ class Rezero(torch.nn.Module):
 
 
 def add_model_args(parser):
-
     # Flow params
     parser.add_argument('--num_steps', type=int, default=1)
     parser.add_argument('--actnorm', type=eval, default=False)
@@ -27,16 +26,16 @@ def add_model_args(parser):
 
     # Transformer params.
     parser.add_argument('--transformer_dim', type=int, default=512)
-    parser.add_argument('--transformer_heads', type=int, default=8)
-    parser.add_argument('--transformer_depth', type=int, default=2)
+    parser.add_argument('--transformer_heads', type=int, default=16)
+    parser.add_argument('--transformer_depth', type=int, default=12)
     parser.add_argument('--transformer_blocks', type=int, default=1)
     parser.add_argument('--transformer_dropout', type=float, default=0.0)
     parser.add_argument('--transformer_reversible', type=eval, default=False)
 
-    parser.add_argument('--transformer_local_heads', type=int, default=4)
+    parser.add_argument('--transformer_local_heads', type=int, default=8)
     parser.add_argument('--transformer_local_size', type=int, default=128)
 
-    parser.add_argument('--diffusion_steps', type=int, default=100)
+    parser.add_argument('--diffusion_steps', type=int, default=1000)
     parser.add_argument('--diffusion_sharing', type=eval, default=True)
     parser.add_argument('--diffusion_loss', type=str, default='vb_stochastic')
     parser.add_argument('--diffusion_parametrization', type=str, default='x0')
