@@ -1,213 +1,186 @@
-# coding=utf-8
-# Copyright 2022 The Google Research Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+import json
+import numpy as np
+import os
+import torch
+import torch.nn as nn
+import urllib.request
+import zipfile
 
-"""Datasets.
-
-All data generated should be in [0, 255].
-Data loaders should iterate through the data in the same order for all hosts,
-and sharding across hosts is done here.
-"""
-
-from typing import Sequence, Tuple
-from absl import logging
-import jax.numpy as jnp
-import tensorflow.compat.v2 as tf
-import tensorflow_datasets as tfds
-
-import utils
+from torch.utils.data import Dataset
 
 
-def batch_dataset(dataset, batch_shape):
-    for b in reversed(batch_shape):
-        dataset = dataset.batch(b, drop_remainder=True)
-    return dataset
+DATA_PATH = './datasets'
 
 
-def shard_dataset(dataset, *, shard_id, num_shards):
-    """Shard a dataset, ensuring that all shards have equal cardinality."""
-    assert 0 <= shard_id < num_shards
-    logging.info('Sharding dataset: shard_id=%d num_shards=%d', shard_id,
-                num_shards)
+class Vocab():
+    def __init__(self, stoi={}):
+        self.fill(stoi)
 
-    if num_shards == 1:
-        return dataset
+    def fill(self, stoi):
+        self.stoi = stoi
+        self.itos = {i:s for s,i in stoi.items()}
 
-    def get_current_shard(z):
-        assert z.shape[0] == num_shards
-        return z[shard_id]
+    def save_json(self, path):
+        if not os.path.exists(path): os.makedirs(path)
+        vocab_file = os.path.join(path, 'vocab.json')
+        with open(vocab_file, 'w') as f:
+            json.dump(self.stoi, f, indent=4)
 
-    dataset = dataset.batch(num_shards, drop_remainder=True)
-    dataset = dataset.map(lambda x: tf.nest.map_structure(get_current_shard, x))
-    return dataset
+    def load_json(self, path):
+        vocab_file = os.path.join(path, 'vocab.json')
+        with open(vocab_file, 'r') as f:
+            stoi = json.load(f)
+        self.fill(stoi)
+
+    def string_to_idx(self, string):
+        assert isinstance(string, str)
+        return [self.stoi[s] for s in string]
+
+    def idx_to_string(self, idx):
+        assert isinstance(idx, list)
+        count_err = np.sum([1 for i in idx if i not in self.itos])
+        if count_err > 0:
+            print(f'Warning, {count_err} decodings were not in vocab.')
+            print(set([i for i in idx if i not in self.itos]))
+        return ''.join([self.itos[i] if i in self.itos else '?' for i in idx])
+
+    def encode(self, text, padding_value=0):
+        assert isinstance(text, list)
+        length = torch.tensor([len(string) for string in text])
+        tensor_list = [torch.tensor(self.string_to_idx(string)) for string in text]
+        tensor = nn.utils.rnn.pad_sequence(tensor_list, batch_first=True, padding_value=padding_value)
+        return tensor, length
+
+    def decode(self, tensor, length):
+        assert torch.is_tensor(tensor)
+        assert tensor.dim() == 2, 'Tensor should have shape (batch_size, seq_len)'
+        text = [self.idx_to_string(tensor[b][:length[b]].tolist()) for b in range(tensor.shape[0])]
+        return text
 
 
-class Dataset:
-    """Generic dataset.
+class Text8(Dataset):
+    """
+    The text8 dataset consisting of 100M characters (with vocab size 27).
+    We here split the dataset into (90M, 5M, 5M) characters for
+    (train, val, test) as in [1,2,3].
 
-    All generated image data should be in [0, 255], and these subclasses are
-    responsible for sharding across hosts.
+    The sets are then split into chunks of equal length as specified by `seq_len`.
+    The default is 256, corresponding to what was used in [1]. Other choices
+    include 180, as [2] reports using.
     """
 
-    @property
-    def data_shape(self):
-        """Data shape, e.g. (32, 32, 3) for an image."""
-        raise NotImplementedError
+    def __init__(self, root=DATA_PATH, seq_len=256, split='train', download=False):
+        assert split in {'train', 'valid', 'test'}
+        self.root = os.path.join(root, 'text8')
+        self.seq_len = seq_len
+        self.split = split
 
-    @property
-    def num_train(self):
-        """Size of training set."""
-        raise NotImplementedError
+        if not os.path.exists(self.raw_file):
+            if download:
+                self.download()
+            else:
+                raise RuntimeError('Dataset not found. You can use download=True to download it.')
 
-    @property
-    def num_eval(self):
-        """Size of eval set."""
-        raise NotImplementedError
-
-    @property
-    def num_classes(self):
-        """Number of classes."""
-        raise NotImplementedError
-
-    def get_tf_dataset(self, *, batch_shape, split,
-                        global_rng, repeat, shuffle,
-                        augment, shard_id, num_shards):
-        """Training dataset function.
-
-        Args:
-        batch_shape: tuple: leading batch dims
-        split: str: 'train' or 'eval'
-        global_rng: Jax PRNG for shuffling (equal across all hosts)
-        repeat: bool: enables repeating the dataset
-        shuffle: bool: enables shuffling
-        augment: bool: data augmentation
-        shard_id: int: the current shard (jax.host_id())
-        num_shards: int: total number of shards (jax.host_count())
-
-        Returns:
-        tf.data.Dataset
-        """
-        raise NotImplementedError
-
-
-class CIFAR10(Dataset):
-    """CIFAR10 dataset."""
-
-    def __init__(self, *, class_conditional, randflip, rot90=False):
-        self._class_conditional = class_conditional
-        self._randflip = randflip
-        self._rot90 = rot90
-
-    @property
-    def data_shape(self):
-        return (32, 32, 3)
-
-    @property
-    def num_train(self):
-        return 50000
-
-    @property
-    def num_eval(self):
-        return 10000
-
-    @property
-    def num_classes(self):
-        return 10 if self._class_conditional else 1
-
-    def _preprocess_and_batch(self, ds, *, batch_shape, augment):
-        """Data preprocessing (and augmentation) and batching."""
-
-        def preprocess(x):
-            img = tf.cast(x['image'], tf.float32)
-            aug = None
-            if augment:  # NOTE: this makes training nondeterministic
-                if self._randflip:
-                    augment_img = tf.image.flip_left_right(img)
-                    aug = tf.random.uniform(shape=[]) > 0.5
-                    img = tf.where(aug, augment_img, img)
-                if self._rot90:
-                    u = tf.random.uniform(shape=[])
-                    k = tf.cast(tf.floor(4. * u), tf.int32)
-                    img = tf.image.rot90(img, k=k)
-                    aug = aug | (k > 0)
-            if aug is None:
-                aug = tf.convert_to_tensor(False, dtype=tf.bool)
-            out = {'image': img, 'augmented': aug}
-            if self._class_conditional:
-                out['label'] = tf.cast(x['label'], tf.int32)
-            return out
-
-        ds = ds.map(preprocess, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-        ds = batch_dataset(ds, batch_shape=batch_shape)
-        ds = ds.prefetch(tf.data.experimental.AUTOTUNE)
-        return ds
-
-    def get_tf_dataset(self, *, batch_shape, split, global_rng, repeat,
-                        shuffle, augment, shard_id,
-                        num_shards):
-        """Training dataset."""
-        if split == 'train':
-            split_str = 'train'
-        elif split == 'eval':
-            split_str = 'test'
+        # Get vocabulary
+        self.vocab = Vocab()
+        vocab_file = os.path.join(self.root, 'vocab.json')
+        if os.path.exists(vocab_file):
+            self.vocab.load_json(self.root)
         else:
-            raise NotImplementedError
-        if shuffle:
-            global_rng = utils.RngGen(global_rng)
-        ds = tfds.load(
-            'cifar10',
-            split=split_str,
-            shuffle_files=shuffle,
-            read_config=None if not shuffle else tfds.ReadConfig(
-                shuffle_seed=utils.jax_randint(next(global_rng))))
-        if repeat:
-            ds = ds.repeat()
-        if shuffle:
-            ds = ds.shuffle(50000, seed=utils.jax_randint(next(global_rng)))
-        ds = shard_dataset(ds, shard_id=shard_id, num_shards=num_shards)
-        return self._preprocess_and_batch(
-            ds, batch_shape=batch_shape, augment=augment)
+            stoi = self._create_stoi()
+            self.vocab.fill(stoi)
+            self.vocab.save_json(self.root)
 
+        # Preprocess data
+        if not os.path.exists(self.processed_file(split)):
+            self._preprocess_data(split)
 
-class MockCIFAR10(CIFAR10):
-    """Mocked version of CIFAR10 dataset."""
+        # Load data
+        self.data = torch.load(self.processed_file(split))
+
+    def __getitem__(self, index):
+        return self.data[index], self.seq_len
+
+    def __len__(self):
+        return len(self.data)
+
+    def _create_stoi(self):
+        rawdata = zipfile.ZipFile(self.raw_file).read('text8').decode('utf-8')
+        s = sorted(list(set(rawdata)))
+        stoi = {s[i]: i for i in range(len(s))}
+        return stoi
+
+    def _preprocess_data(self, split):
+        # Read raw data
+        rawdata = zipfile.ZipFile(self.raw_file).read('text8').decode('utf-8')
+
+        # Extract subset
+        if split == 'train':
+            rawdata = rawdata[:90000000]
+        elif split == 'valid':
+            rawdata = rawdata[90000000:95000000]
+        elif split == 'test':
+            rawdata = rawdata[95000000:]
+
+        # Encode characters
+        data = torch.tensor([self.vocab.stoi[s] for s in rawdata])
+
+        # Split into chunks
+        data = data[:self.seq_len*(len(data)//self.seq_len)]
+        data = data.reshape(-1, self.seq_len)
+
+        # Save processed data
+        torch.save(data, self.processed_file(split))
 
     @property
-    def data_shape(self):
-        return (8, 8, 3)
+    def raw_file(self):
+        return os.path.join(self.root, 'text8.zip')
 
-    @property
-    def num_train(self):
-        return 10
+    def processed_file(self, split):
+        return os.path.join(self.root, 'processed_{}.pt'.format(split))
 
-    @property
-    def num_eval(self):
-        return 10
+    def download(self):
+        if not os.path.exists(self.root):
+            os.makedirs(self.root)
 
-    def get_tf_dataset(self, *, batch_shape, split, global_rng, repeat,
-                        shuffle, augment, shard_id,
-                        num_shards):
-        del split, global_rng, repeat, shuffle
-        ds = tf.data.Dataset.from_tensors({
-            'image':
-                tf.fill(
-                    dims=self.data_shape,
-                    value=tf.constant(127, dtype=tf.uint8),
-                ),
-            'label':
-                tf.zeros(shape=(), dtype=tf.int64),
-        }).repeat()
-        ds = shard_dataset(ds, shard_id=shard_id, num_shards=num_shards)
-        return self._preprocess_and_batch(
-            ds, batch_shape=batch_shape, augment=augment)
+        print('Downloading text8...')
+        url = 'http://mattmahoney.net/dc/text8.zip'
+        print('Downloading from {}...'.format(url))
+        urllib.request.urlretrieve(url, self.raw_file)
+        print('Saved to {}'.format(self.raw_file))
+
+
+if __name__ == "__main__":
+    import argparse
+    from torch.utils.data import DataLoader, ConcatDataset
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', type=str, default='text8')
+    parser.add_argument('--validation', type=eval, default=True)
+    # Train params
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--pin_memory', type=eval, default=False)
+
+    args = parser.parse_args()
+
+    if args.dataset == "text8":
+        train = Text8(seq_len=256, split="train", download=True)
+        valid = Text8(seq_len=256, split="valid")
+        test = Text8(seq_len=256, split="test")
+        data_shape = (256,)
+        num_classes = 27
+
+    # Data Loader
+    if args.validation:
+        train_loader = DataLoader(train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=args.pin_memory)
+        eval_loader = DataLoader(valid, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=args.pin_memory)
+    else:
+        dataset_train = ConcatDataset([train, valid])
+        train_loader = DataLoader(dataset_train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=args.pin_memory)
+        eval_loader = DataLoader(test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=args.pin_memory)
+
+    for i, (x, length) in enumerate(train_loader):
+        print(x)
+        print(length)
+        break
