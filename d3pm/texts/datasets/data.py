@@ -11,9 +11,9 @@ def add_data_args(parser):
     parser.add_argument('--validation', type=eval, default=True)
 
     # Train params
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--pin_memory', type=eval, default=False)
+    parser.add_argument('--pin_memory', type=eval, default=True)
 
 
 def get_data_id(args):
