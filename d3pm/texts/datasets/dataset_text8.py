@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 from .vocab import Vocab
 
 
-DATA_PATH = './datasets'
+DATA_PATH = './.datasets'
 
 
 class Text8Dataset(Dataset):

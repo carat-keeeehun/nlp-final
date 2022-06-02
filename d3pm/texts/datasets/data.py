@@ -31,12 +31,6 @@ def get_data(args):
         test = Text8Dataset(seq_len=256, split='test')
         data_shape = (256,)
         num_classes = 27
-    elif args.dataset == 'ptb_catnf':
-        train = PennTreebankDataset(max_seq_len=288, split='train', preproc='catnf', download=True)
-        valid = PennTreebankDataset(max_seq_len=288, split='valid', preproc='catnf')
-        test = PennTreebankDataset(max_seq_len=288, split='test', preproc='catnf')
-        data_shape = (288,)
-        num_classes = 51
     elif args.dataset == 'enwik8_blocksparse':
         train = EnWik8Dataset(seq_len=320, split='train', download=True)
         valid = EnWik8Dataset(seq_len=320, split='valid')
