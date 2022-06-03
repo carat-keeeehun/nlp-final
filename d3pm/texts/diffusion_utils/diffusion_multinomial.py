@@ -1,26 +1,18 @@
+"""
+Based in part on: https://github.com/lucidrains/denoising-diffusion-pytorch/blob/5989f4c77eafcdc6be0fb4739f0f277a6dd7f7d8/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py#L281
+"""
+from tkinter import X
 import torch
 import torch.nn.functional as F
 import numpy as np
 from inspect import isfunction
 
 
-"""
-Based in part on: https://github.com/lucidrains/denoising-diffusion-pytorch/blob/5989f4c77eafcdc6be0fb4739f0f277a6dd7f7d8/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py#L281
-"""
-eps = 1e-8
+def mean_except_batch(x, num_dims=1):
+    return x.mean(dim=tuple(range(num_dims, len(x.shape))))
 
 
 def sum_except_batch(x, num_dims=1):
-    '''
-    Sums all dimensions except the first.
-
-    Args:
-        x: Tensor, shape (batch_size, ...)
-        num_dims: int, number of batch dims (default=1)
-
-    Returns:
-        x_sum: Tensor, shape (batch_size,)
-    '''
     return x.reshape(*x.shape[:num_dims], -1).sum(-1)
 
 
@@ -49,8 +41,8 @@ def default(val, d):
     return d() if isfunction(d) else d
 
 
-def log_categorical(log_x_start, log_prob):
-    return (log_x_start.exp() * log_prob).sum(dim=1)
+def log_categorical(x_start, logits):
+    return (F.log_softmax(logits, dim=-1) * F.one_hot(x_start, logits.shape[-1])).sum(dim=-1)
 
 
 def index_to_log_onehot(x, num_classes):
@@ -90,16 +82,29 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     return alphas
 
 
+def get_diffusion_betas(transition_mat_type, num_timesteps):
+    """Get betas from the hyperparameters."""
+    if transition_mat_type == 'gaussian':
+        return np.linspace(1e-4, 0.02, num_timesteps)
+    elif transition_mat_type == 'uniform':
+        steps = np.arange(num_timesteps + 1, dtype=np.float64) / num_timesteps
+        alpha_bar = np.cos((steps + 0.008) / 1.008 * np.pi * 0.5)
+        betas = np.minimum(1 - alpha_bar[1:] / alpha_bar[:-1], 0.999)
+        return betas
+    elif transition_mat_type == 'absorbing':
+        return 1. / np.linspace(num_timesteps, 1., num_timesteps)
+    else:
+        raise NotImplementedError(transition_mat_type)
+
+
 class MultinomialDiffusion(torch.nn.Module):
     def __init__(self, num_classes, shape, denoise_fn, timesteps=1000,
-                 loss_type='vb_stochastic', parametrization='x0'):
+                 loss_type='hybrid', parametrization='x0', hybrid_coeff=0.01, 
+                 transition_bands=None, transition_mat_type="uniform"):
         super(MultinomialDiffusion, self).__init__()
-        assert loss_type in ('vb_stochastic', 'vb_all')
+        assert loss_type in ('kl', 'cross_entropy_x_start', 'hybrid')
         assert parametrization in ('x0', 'direct')
-
-        if loss_type == 'vb_all':
-            print('Computing the loss using the bound on _all_ timesteps.'
-                  ' This is expensive both in terms of memory and computation.')
+        assert transition_mat_type in ("uniform", "absorbing")
 
         self.num_classes = num_classes
         self._denoise_fn = denoise_fn
@@ -107,6 +112,42 @@ class MultinomialDiffusion(torch.nn.Module):
         self.shape = shape
         self.num_timesteps = timesteps
         self.parametrization = parametrization
+
+        self.hybrid_coeff = hybrid_coeff
+        self.loss_type = loss_type
+        self.transition_bands = transition_bands
+        self.transition_mat_type = transition_mat_type
+        self.eps = 1e-6
+
+        betas = get_diffusion_betas(transition_mat_type, timesteps)
+        if not isinstance(betas, np.ndarray):
+            raise ValueError('expected betas to be a numpy array')
+        if not ((betas > 0).all() and (betas <= 1).all()):
+            raise ValueError('betas must be in (0, 1]')
+        self.betas = betas = betas.astype(np.float64)
+
+        # Construct transition matrices for q(x_t|x_{t-1}). t goes from {0, ..., T-1}
+        if self.transition_mat_type == "uniform":
+            q_one_step_mats = [self._get_transition_mat(t) for t in range(self.num_timesteps)]
+        elif self.transition_mat_type == "absorbing":
+            q_one_step_mats = [self._get_absorbing_transition_mat(t) for t in range(self.num_timesteps)]
+        else:
+            raise ValueError(f"transition_mat_type must be 'uniform', 'absorbing', but is {self.transition_mat_type}")
+
+        self.q_onestep_mats = torch.stack(q_one_step_mats, dim=0)
+        assert self.q_onestep_mats.shape == (self.num_timesteps, self.num_classes, self.num_classes)
+
+        # Construct transition matrices for q(x_t|x_start)
+        q_mat_t = self.q_onestep_mats[0]
+        q_mats = [q_mat_t]
+        for t in range(1, self.num_timesteps):
+            q_mat_t = torch.tensordot(q_mat_t, self.q_onestep_mats[t], dims=[[1], [0]])
+            q_mats.append(q_mat_t)
+
+        self.register_buffer("q_mats", torch.stack(q_mats, dim=0))
+        assert self.q_mats.shape == (self.num_timesteps, self.num_classes, self.num_classes), self.q_mats.shape
+        self.register_buffer("transpose_q_onestep_mats", torch.permute(self.q_onestep_mats, dims=(0, 2, 1)))
+        del self.q_onestep_mats
 
         alphas = cosine_beta_schedule(timesteps)
 
@@ -130,9 +171,47 @@ class MultinomialDiffusion(torch.nn.Module):
         self.register_buffer('Lt_history', torch.zeros(timesteps))
         self.register_buffer('Lt_count', torch.zeros(timesteps))
 
-    def multinomial_kl(self, log_prob1, log_prob2):
-        kl = (log_prob1.exp() * (log_prob1 - log_prob2)).sum(dim=1)
-        return kl
+    def _get_full_transition_mat(self, t):
+        beta_t = self.betas[t]
+        mat = torch.full(size=(self.num_classes, self.num_classes),
+                         fill_value=beta_t / float(self.num_classes))
+        mat[range(self.num_classes), range(self.num_classes)] = 1. - beta_t * (self.num_classes - 1.) / self.num_classes
+        return mat
+
+    def _get_transition_mat(self, t):
+        if self.transition_bands is None:
+            return self._get_full_transition_mat(t)
+
+        # Assumes num_off_diags < num_pixel_vals
+        beta_t = self.betas[t]
+
+        mat = torch.zeros((self.num_classes, self.num_classes))
+        off_diag = torch.full(size=(self.num_classes - 1,),
+                              fill_value=beta_t / float(self.num_classes))
+        for k in range(1, self.transition_bands + 1):
+            mat += torch.diag(off_diag, diagonal=k)
+            mat += torch.diag(off_diag, diagonal=-k)
+            off_diag = off_diag[:-1]
+
+        # Add diagonal values such that rows sum to one.
+        diag = 1. - mat.sum(1)
+        mat += torch.diag(diag, diagonal=0)
+        return mat
+
+    def _get_absorbing_transition_mat(self, t):
+        beta_t = self.betas[t]
+        diag = torch.full(size=(self.num_classes,), fill_value=1. - beta_t)
+        mat = torch.diag(diag, diagonal=0)
+        # Add beta_t for the absorbing state.
+        mat[:, self.num_classes - 1] += beta_t
+
+        return mat
+
+    def multinomial_kl(self, logits1, logits2, eps=1e-6):
+        kl = ((F.softmax(logits1 + eps, dim=-1) * 
+              (F.log_softmax(logits1 + eps, dim=-1) - 
+              F.log_softmax(logits2 + eps, dim=-1))))
+        return kl.sum(dim=-1)
 
     def q_pred_one_timestep(self, log_x_t, t):
         log_alpha_t = extract(self.log_alpha, t, log_x_t.shape)
@@ -146,70 +225,59 @@ class MultinomialDiffusion(torch.nn.Module):
 
         return log_probs
 
-    def q_pred(self, log_x_start, t):
-        log_cumprod_alpha_t = extract(self.log_cumprod_alpha, t, log_x_start.shape)
-        log_1_min_cumprod_alpha = extract(self.log_1_min_cumprod_alpha, t, log_x_start.shape)
+    def _at(self, a, t, x):
+        t_broadcast = t[(...,) + (None,) * len(range(1, x.ndim))]
+        return a[t_broadcast, x]
 
-        log_probs = log_add_exp(
-            log_x_start + log_cumprod_alpha_t,
-            log_1_min_cumprod_alpha - np.log(self.num_classes)
-        )
+    def _at_onehot(self, a, t, x):
+        return torch.matmul(x, a[t, Ellipsis])
 
-        return log_probs
+    def q_pred(self, x_start, t):
+        # x_start.shape = (bs, seq_len)
+        # t.shape = (bs,)
+        # out.shape = (bs, seq_len, num_classes)
+        return self._at(self.q_mats, t, x_start)
 
-    def predict_start(self, log_x_t, t):
-        x_t = log_onehot_to_index(log_x_t)
-
-        out = self._denoise_fn(t, x_t)
-
-        assert out.size(0) == x_t.size(0)
-        assert out.size(1) == self.num_classes
-        assert out.size()[2:] == x_t.size()[1:]
-        log_pred = F.log_softmax(out, dim=1)
-        return log_pred
-
-    def q_posterior(self, log_x_start, log_x_t, t):
+    def q_posterior(self, x_start, x_t, t, x_start_logits):
         # q(xt-1 | xt, x0) = q(xt | xt-1, x0) * q(xt-1 | x0) / q(xt | x0)
         # where q(xt | xt-1, x0) = q(xt | xt-1).
 
-        # EV_log_qxt_x0 = self.q_pred(log_x_start, t)
-
-        # print('sum exp', EV_log_qxt_x0.exp().sum(1).mean())
-        # assert False
-
-        # log_qxt_x0 = (log_x_t.exp() * EV_log_qxt_x0).sum(dim=1)
-
-        t_minus_1 = t - 1
-        # Remove negative values, will not be used anyway for final decoder
-        t_minus_1 = torch.where(t_minus_1 < 0, torch.zeros_like(t_minus_1), t_minus_1)
-        log_EV_qxtmin_x0 = self.q_pred(log_x_start, t_minus_1)
-
-        num_axes = (1,) * (len(log_x_start.size()) - 1)
-        t_broadcast = t.view(-1, *num_axes) * torch.ones_like(log_x_start)
-        log_EV_qxtmin_x0 = torch.where(t_broadcast == 0, log_x_start, log_EV_qxtmin_x0)
-
-        # unnormed_logprobs = log_EV_qxtmin_x0 +
-        #                     log q_pred_one_timestep(x_t, t)
-        # Note: _NOT_ x_tmin1, which is how the formula is typically used!!!
-        # Not very easy to see why this is true. But it is :)
-        unnormed_logprobs = log_EV_qxtmin_x0 + self.q_pred_one_timestep(log_x_t, t)
-
-        log_EV_xtmin_given_xt_given_xstart = \
-            unnormed_logprobs \
-            - torch.logsumexp(unnormed_logprobs, dim=1, keepdim=True)
-
-        return log_EV_xtmin_given_xt_given_xstart
-
-    def p_pred(self, log_x, t):
-        if self.parametrization == 'x0':
-            log_x_recon = self.predict_start(log_x, t=t)
-            log_model_pred = self.q_posterior(
-                log_x_start=log_x_recon, log_x_t=log_x, t=t)
-        elif self.parametrization == 'direct':
-            log_model_pred = self.predict_start(log_x, t=t)
+        if x_start_logits:
+            assert x_start.shape == x_t.shape + (self.num_classes,), (x_start.shape, x_t.shape)
         else:
-            raise ValueError
-        return log_model_pred
+            assert x_start.shape == x_t.shape, (x_start.shape, x_t.shape)
+
+        fact1 = self._at(self.transpose_q_onestep_mats, t, x_t)
+        if x_start_logits:
+            fact2 = self._at_onehot(self.q_mats, t - 1, F.softmax(x_start, dim=-1))
+            tzero_logits = x_start
+        else:
+            fact2 = self._at(self.q_mats, t - 1, x_start)
+            tzero_logits = torch.log(F.one_hot(x_start, self.num_classes) + self.eps)
+
+        out = torch.log(fact1 + self.eps) + torch.log(fact2 + self.eps)
+        t_broadcast = t[(...,) + (None,) * len(range(1, out.ndim))]
+        return torch.where(t_broadcast == 0, tzero_logits, out)
+
+    def p_pred(self, x, t):
+        # Compute logits of p(x_{t-1} | x_t).
+        assert t.shape == (x.shape[0],)
+        model_logits = self._denoise_fn(t, x)
+
+        if self.parametrization == 'x0':
+            pred_x_start_logits = model_logits
+            t_broadcast = t[(...,) + (None,) * len(range(1, model_logits.ndim))]
+            model_logits = torch.where(t_broadcast == 0, 
+                                       pred_x_start_logits, 
+                                       self.q_posterior(pred_x_start_logits, x, 
+                                                        t, x_start_logits=True))
+        elif self.parametrization == 'direct':
+            pred_x_start_logits = model_logits
+            raise NotImplementedError(self.parametrization)
+
+        assert model_logits.shape == pred_x_start_logits.shape == x.shape + (self.num_classes,), \
+            (model_logits.shape, pred_x_start_logits.shape, x.shape + (self.num_classes,))
+        return model_logits, pred_x_start_logits
 
     @torch.no_grad()
     def p_sample(self, log_x, t):
@@ -256,61 +324,23 @@ class MultinomialDiffusion(torch.nn.Module):
         log_sample = index_to_log_onehot(sample, self.num_classes)
         return log_sample
 
-    def q_sample(self, log_x_start, t):
-        log_EV_qxt_x0 = self.q_pred(log_x_start, t)
+    def q_sample(self, x_start, t):
+        log_EV_qxt_x0 = torch.log(self.q_pred(x_start, t) + self.eps)
 
-        log_sample = self.log_sample_categorical(log_EV_qxt_x0)
+        uniform = torch.rand_like(log_EV_qxt_x0)
+        gumbel_noise = -torch.log(-torch.log(uniform + 1e-30) + 1e-30)
+        return (gumbel_noise + log_EV_qxt_x0).argmax(dim=-1)
 
-        return log_sample
+    # def kl_prior(self, log_x_start):
+    #     b = log_x_start.size(0)
+    #     device = log_x_start.device
+    #     ones = torch.ones(b, device=device).long()
 
-    def nll(self, log_x_start):
-        b = log_x_start.size(0)
-        device = log_x_start.device
-        loss = 0
-        for t in range(0, self.num_timesteps):
-            t_array = (torch.ones(b, device=device) * t).long()
+    #     log_qxT_prob = self.q_pred(log_x_start, t=(self.num_timesteps - 1) * ones)
+    #     log_half_prob = -torch.log(self.num_classes * torch.ones_like(log_qxT_prob))
 
-            kl = self.compute_Lt(
-                log_x_start=log_x_start,
-                log_x_t=self.q_sample(log_x_start=log_x_start, t=t_array),
-                t=t_array)
-
-            loss += kl
-
-        loss += self.kl_prior(log_x_start)
-
-        return loss
-
-    def kl_prior(self, log_x_start):
-        b = log_x_start.size(0)
-        device = log_x_start.device
-        ones = torch.ones(b, device=device).long()
-
-        log_qxT_prob = self.q_pred(log_x_start, t=(self.num_timesteps - 1) * ones)
-        log_half_prob = -torch.log(self.num_classes * torch.ones_like(log_qxT_prob))
-
-        kl_prior = self.multinomial_kl(log_qxT_prob, log_half_prob)
-        return sum_except_batch(kl_prior)
-
-    def compute_Lt(self, log_x_start, log_x_t, t, detach_mean=False):
-        log_true_prob = self.q_posterior(
-            log_x_start=log_x_start, log_x_t=log_x_t, t=t)
-
-        log_model_prob = self.p_pred(log_x=log_x_t, t=t)
-
-        if detach_mean:
-            log_model_prob = log_model_prob.detach()
-
-        kl = self.multinomial_kl(log_true_prob, log_model_prob)
-        kl = sum_except_batch(kl)
-
-        decoder_nll = -log_categorical(log_x_start, log_model_prob)
-        decoder_nll = sum_except_batch(decoder_nll)
-
-        mask = (t == torch.zeros_like(t)).float()
-        loss = mask * decoder_nll + (1. - mask) * kl
-
-        return loss
+    #     kl_prior = self.multinomial_kl(log_qxT_prob, log_half_prob)
+    #     return sum_except_batch(kl_prior)
 
     def sample_time(self, b, device, method='uniform'):
         if method == 'importance':
@@ -322,70 +352,84 @@ class MultinomialDiffusion(torch.nn.Module):
             pt_all = Lt_sqrt / Lt_sqrt.sum()
 
             t = torch.multinomial(pt_all, num_samples=b, replacement=True)
-
             pt = pt_all.gather(dim=0, index=t)
-
             return t, pt
 
         elif method == 'uniform':
             t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-
             pt = torch.ones_like(t).float() / self.num_timesteps
             return t, pt
         else:
             raise ValueError
 
+    def compute_Lt(self, x_start, x_t, t, detach_mean=False):
+        true_logits = self.q_posterior(x_start=x_start, x_t=x_t, t=t, x_start_logits=False)
+        model_logits, pred_x_start_logits = self.p_pred(x=x_t, t=t)
+
+        if detach_mean:
+            model_logits = model_logits.detach()
+
+        kl = self.multinomial_kl(logits1=true_logits, logits2=model_logits)
+        assert kl.shape == x_start.shape
+        kl = mean_except_batch(kl) / np.log(2.)
+
+        decoder_nll = -log_categorical(x_start, model_logits)
+        assert decoder_nll.shape == x_start.shape
+        decoder_nll = mean_except_batch(decoder_nll) / np.log(2.)
+
+        assert kl.shape == decoder_nll.shape == t.shape == (x_start.shape[0],)
+        return torch.where(t == 0, decoder_nll, kl), pred_x_start_logits
+
+    def cross_entropy_x_start(self, x_start, pred_x_start_logits):
+        ce = -log_categorical(x_start, pred_x_start_logits)
+        assert ce.shape == x_start.shape
+        ce = mean_except_batch(ce) / np.log(2.)
+        assert ce.shape == (x_start.shape[0],)
+        return ce
+
     def _train_loss(self, x):
         b, device = x.size(0), x.device
 
-        if self.loss_type == 'vb_stochastic':
-            x_start = x
+        x_start = x
+        t, pt = self.sample_time(b, device, 'uniform')
 
-            t, pt = self.sample_time(b, device, 'importance')
-
-            log_x_start = index_to_log_onehot(x_start, self.num_classes)
-
-            kl = self.compute_Lt(
-                log_x_start, self.q_sample(log_x_start=log_x_start, t=t), t)
-
-            Lt2 = kl.pow(2)
-            Lt2_prev = self.Lt_history.gather(dim=0, index=t)
-            new_Lt_history = (0.1 * Lt2 + 0.9 * Lt2_prev).detach()
-            self.Lt_history.scatter_(dim=0, index=t, src=new_Lt_history)
-            self.Lt_count.scatter_add_(dim=0, index=t, src=torch.ones_like(Lt2))
-
-            kl_prior = self.kl_prior(log_x_start)
-
-            # Upweigh loss term of the kl
-            vb_loss = kl / pt + kl_prior
-
-            return -vb_loss
-
-        elif self.loss_type == 'vb_all':
-            # Expensive, dont do it ;).
-            return -self.nll(x)
+        x_t = self.q_sample(x_start=x_start, t=t)
+        if self.loss_type == 'kl':
+            losses, _ = self.compute_Lt(x_start, x_t, t)
+        elif self.loss_type == 'cross_entropy_x_start':
+            _, pred_x_start_logits = self.p_pred(x=x_t, t=t)
+            losses = self.cross_entropy_x_start(x_start=x_start, pred_x_start_logits=pred_x_start_logits)
+        elif self.loss_type == 'hybrid':
+            vb_losses, pred_x_start_logits = self.compute_Lt(x_start, x_t, t)
+            ce_losses = self.cross_entropy_x_start(x_start=x_start, pred_x_start_logits=pred_x_start_logits)
+            losses = vb_losses + self.hybrid_coeff * ce_losses
         else:
-            raise ValueError()
+            raise NotImplementedError(self.loss_type)
+
+        assert losses.shape == t.shape
+        return -losses
 
     def log_prob(self, x):
         b, device = x.size(0), x.device
         if self.training:
             return self._train_loss(x)
-
         else:
-            log_x_start = index_to_log_onehot(x, self.num_classes)
+            t, pt = self.sample_time(b, device, 'uniform')
 
-            t, pt = self.sample_time(b, device, 'importance')
+            x_t = self.q_sample(x_start=x, t=t)
+            if self.loss_type == 'kl':
+                losses, _ = self.compute_Lt(x, x_t, t)
+            elif self.loss_type == 'cross_entropy_x_start':
+                _, pred_x_start_logits = self.p_pred(x=x_t, t=t)
+                losses = self.cross_entropy_x_start(x_start=x, pred_x_start_logits=pred_x_start_logits)
+            elif self.loss_type == 'hybrid':
+                vb_losses, pred_x_start_logits = self.compute_Lt(x, x_t, t)
+                ce_losses = self.cross_entropy_x_start(x_start=x, pred_x_start_logits=pred_x_start_logits)
+                losses = vb_losses + self.hybrid_coeff * ce_losses
+            else:
+                raise NotImplementedError(self.loss_type)
 
-            kl = self.compute_Lt(
-                log_x_start, self.q_sample(log_x_start=log_x_start, t=t), t)
-
-            kl_prior = self.kl_prior(log_x_start)
-
-            # Upweigh loss term of the kl
-            loss = kl / pt + kl_prior
-
-            return -loss
+            return -losses
 
     def sample(self, num_samples):
         b = num_samples

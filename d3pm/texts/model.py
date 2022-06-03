@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from diffusion_utils.diffusion_multinomial import MultinomialDiffusion
+from diffusion_utils.diffusion_multinomial import MultinomialDiffusion, default
 
 from layers.transformer import LinearAttentionTransformerEmbedding
 
@@ -37,14 +37,17 @@ def add_model_args(parser):
 
     parser.add_argument('--diffusion_steps', type=int, default=1000)
     parser.add_argument('--diffusion_sharing', type=eval, default=True)
-    parser.add_argument('--diffusion_loss', type=str, default='vb_stochastic')
+    parser.add_argument('--diffusion_loss', type=str, default='hybrid')
     parser.add_argument('--diffusion_parametrization', type=str, default='x0')
+    parser.add_argument('--diffusion_hybrid_coeff', type=float, default=0.01)
+    parser.add_argument('--diffusion_transition_bands', default=None)
+    parser.add_argument('--diffusion_transition_mat_type', type=str, default="uniform")
 
     parser.add_argument('--diffusion_binary_scale', type=float, default=.5)
 
 
 def get_model_id(args):
-    return 'multinomial_diffusion_v2'
+    return 'uniform_diffusion' if args.diffusion_transition_mat_type == "uniform" else "absorbing_diffusion"
 
 
 def get_model(args, data_shape, num_classes):
@@ -61,6 +64,9 @@ def get_model(args, data_shape, num_classes):
     diffusion_steps = args.diffusion_steps
     diffusion_loss = args.diffusion_loss
     diffusion_parametrization = args.diffusion_parametrization
+    diffusion_hybrid_coeff = args.diffusion_hybrid_coeff
+    diffusion_transition_bands = args.diffusion_transition_bands
+    diffusion_transition_mat_type = args.diffusion_transition_mat_type
 
     C, L = 1, data_shape[0]
 
@@ -97,7 +103,6 @@ def get_model(args, data_shape, num_classes):
 
         def forward(self, t, x):
             x = self.transformer(x, t)
-            x = x.permute(0, 2, 1)
             x = self.rezero(x)
             return x
 
@@ -107,5 +112,8 @@ def get_model(args, data_shape, num_classes):
         num_classes, current_shape, dynamics,
         timesteps=diffusion_steps,
         loss_type=diffusion_loss,
-        parametrization=diffusion_parametrization)
+        parametrization=diffusion_parametrization,
+        hybrid_coeff=diffusion_hybrid_coeff,
+        transition_bands=diffusion_transition_bands,
+        transition_mat_type=diffusion_transition_mat_type)
     return base_dist
