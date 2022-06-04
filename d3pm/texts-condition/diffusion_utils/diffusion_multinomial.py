@@ -262,7 +262,7 @@ class MultinomialDiffusion(torch.nn.Module):
     def p_pred(self, x, c, t):
         # Compute logits of p(x_{t-1} | x_t).
         assert t.shape == (x.shape[0],)
-        model_logits = self._denoise_fn(t, x, c)
+        model_logits = self._denoise_fn(t=t, x=x, condition=c)
 
         if self.parametrization == 'x0':
             pred_x_start_logits = model_logits
@@ -371,11 +371,11 @@ class MultinomialDiffusion(torch.nn.Module):
 
         kl = self.multinomial_kl(logits1=true_logits, logits2=model_logits)
         assert kl.shape == x_start.shape
-        kl = mean_except_batch(kl) / np.log(2.)
+        kl = sum_except_batch(kl)
 
         decoder_nll = -log_categorical(x_start, model_logits)
         assert decoder_nll.shape == x_start.shape
-        decoder_nll = mean_except_batch(decoder_nll) / np.log(2.)
+        decoder_nll = sum_except_batch(decoder_nll)
 
         assert kl.shape == decoder_nll.shape == t.shape == (x_start.shape[0],)
         return torch.where(t == 0, decoder_nll, kl), pred_x_start_logits
@@ -383,7 +383,7 @@ class MultinomialDiffusion(torch.nn.Module):
     def cross_entropy_x_start(self, x_start, pred_x_start_logits):
         ce = -log_categorical(x_start, pred_x_start_logits)
         assert ce.shape == x_start.shape
-        ce = mean_except_batch(ce) / np.log(2.)
+        ce = sum_except_batch(ce)
         assert ce.shape == (x_start.shape[0],)
         return ce
 
@@ -395,12 +395,14 @@ class MultinomialDiffusion(torch.nn.Module):
 
         x_t = self.q_sample(x_start=x_start, t=t)
         if self.loss_type == 'kl':
-            losses, _ = self.compute_Lt(x_start, x_t, c=c, t=t)
+            losses, _ = self.compute_Lt(x_start, x_t, c, t=t)
+            losses = losses / pt
         elif self.loss_type == 'cross_entropy_x_start':
             _, pred_x_start_logits = self.p_pred(x=x_t, c=c, t=t)
             losses = self.cross_entropy_x_start(x_start=x_start, pred_x_start_logits=pred_x_start_logits)
         elif self.loss_type == 'hybrid':
-            vb_losses, pred_x_start_logits = self.compute_Lt(x_start, x_t, c=c, t=t)
+            vb_losses, pred_x_start_logits = self.compute_Lt(x_start, x_t, c, t=t)
+            vb_losses = vb_losses / pt
             ce_losses = self.cross_entropy_x_start(x_start=x_start, pred_x_start_logits=pred_x_start_logits)
             losses = vb_losses + self.hybrid_coeff * ce_losses
         else:
@@ -419,11 +421,13 @@ class MultinomialDiffusion(torch.nn.Module):
             x_t = self.q_sample(x_start=x, t=t)
             if self.loss_type == 'kl':
                 losses, _ = self.compute_Lt(x, x_t, c, t)
+                losses = losses / pt
             elif self.loss_type == 'cross_entropy_x_start':
                 _, pred_x_start_logits = self.p_pred(x=x_t, c=c, t=t)
                 losses = self.cross_entropy_x_start(x_start=x, pred_x_start_logits=pred_x_start_logits)
             elif self.loss_type == 'hybrid':
                 vb_losses, pred_x_start_logits = self.compute_Lt(x, x_t, c, t)
+                vb_losses = vb_losses / pt
                 ce_losses = self.cross_entropy_x_start(x_start=x, pred_x_start_logits=pred_x_start_logits)
                 losses = vb_losses + self.hybrid_coeff * ce_losses
             else:
