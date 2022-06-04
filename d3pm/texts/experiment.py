@@ -12,7 +12,8 @@ class Experiment(DiffusionExperiment):
         loss_moving = None
         for iteration, (x, length) in enumerate(self.train_loader):
             x, length = x.to(self.args.device), length.to(self.args.device)
-            loss = -self.model.log_prob(x).mean()
+            num_elem = length.sum()
+            loss = -self.model.log_prob(x).sum() / (math.log(2) * num_elem)
             loss.backward()
             if (iteration + 1) % self.args.update_freq == 0:
                 self.optimizer.step()
@@ -42,7 +43,8 @@ class Experiment(DiffusionExperiment):
             loss_count = 0
             for x, length in self.eval_loader:
                 x, length = x.to(self.args.device), length.to(self.args.device)
-                loss = -self.model.log_prob(x).mean()
+                num_elem = length.sum()
+                loss = -self.model.log_prob(x).sum() / (math.log(2) * num_elem)
                 loss_sum += loss.detach().cpu().item() * len(x)
                 loss_count += len(x)
                 print('Evaluating. Epoch: {}/{}, Datapoint: {}/{}, Bits/char: {:.3f}'.format(epoch+1, self.args.epochs, loss_count, len(self.eval_loader.dataset), loss_sum/loss_count), end='\r')

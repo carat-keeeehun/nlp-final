@@ -25,11 +25,14 @@ def get_data(args):
 
     # Dataset
     if args.dataset == 'text8_256':
-        train = Text8Dataset(seq_len=256, split='train', download=True)
-        valid = Text8Dataset(seq_len=256, split='valid')
-        test = Text8Dataset(seq_len=256, split='test')
+        train = Text8Dataset(args.diffusion_transition_mat_type, seq_len=256, split='train', download=True)
+        valid = Text8Dataset(args.diffusion_transition_mat_type, seq_len=256, split='valid')
+        test = Text8Dataset(args.diffusion_transition_mat_type, seq_len=256, split='test')
         data_shape = (256,)
-        num_classes = 27
+        if args.diffusion_transition_mat_type == "absorbing":
+            num_classes = 28
+        else:
+            num_classes = 27
     elif args.dataset == 'enwik8_blocksparse':
         train = EnWik8Dataset(seq_len=320, split='train', download=True)
         valid = EnWik8Dataset(seq_len=320, split='valid')

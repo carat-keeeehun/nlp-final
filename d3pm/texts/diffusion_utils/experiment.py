@@ -16,6 +16,7 @@ import wandb
 
 def add_exp_args(parser):
     # Train params
+    parser.add_argument('--gpu', type=str, default="3")
     parser.add_argument('--epochs', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', type=str, default='cuda')
@@ -31,7 +32,7 @@ def add_exp_args(parser):
     parser.add_argument('--log_wandb', type=eval, default=True)
     parser.add_argument('--log_home', type=str, default=None)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 
 class DiffusionExperiment(BaseExperiment):

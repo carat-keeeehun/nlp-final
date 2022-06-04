@@ -28,7 +28,7 @@ class Text8Dataset(Dataset):
         Mikolov et al., 2013, http://www.fit.vutbr.cz/~imikolov/rnnlm/char.pdf
     """
 
-    def __init__(self, root=DATA_PATH, seq_len=256, split='train', download=False):
+    def __init__(self, transition_mat_type, root=DATA_PATH, seq_len=256, split='train', download=False):
         assert split in {'train', 'valid', 'test'}
         self.root = os.path.join(root, 'text8')
         self.seq_len = seq_len
@@ -42,7 +42,11 @@ class Text8Dataset(Dataset):
 
         # Get vocabulary
         self.vocab = Vocab()
-        vocab_file = os.path.join(self.root, 'vocab.json')
+        if transition_mat_type == "absorbing":
+            vocab_file = os.path.join(self.root, 'vocab_mask.json')
+        else:
+            vocab_file = os.path.join(self.root, 'vocab.json')
+
         if os.path.exists(vocab_file):
             self.vocab.load_json(self.root)
         else:
