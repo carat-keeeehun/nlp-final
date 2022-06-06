@@ -32,7 +32,7 @@ def add_exp_args(parser):
     parser.add_argument('--log_wandb', type=eval, default=True)
     parser.add_argument('--log_home', type=str, default=None)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 
 class DiffusionExperiment(BaseExperiment):

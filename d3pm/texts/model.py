@@ -47,7 +47,14 @@ def add_model_args(parser):
 
 
 def get_model_id(args):
-    return 'uniform_diffusion' if args.diffusion_transition_mat_type == "uniform" else "absorbing_diffusion"
+    if args.diffusion_transition_mat_type == "uniform":
+        return "uniform_diffusion"
+    elif args.diffusion_transition_mat_type == "absorbing":
+        return "absorbing_diffusion"
+    elif args.diffusion_transition_mat_type == "uniform-mask":
+        return "uniform-mask"
+    else:
+        return "uniform-absorbing"
 
 
 def get_model(args, data_shape, num_classes):

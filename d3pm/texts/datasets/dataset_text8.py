@@ -42,13 +42,13 @@ class Text8Dataset(Dataset):
 
         # Get vocabulary
         self.vocab = Vocab()
-        if transition_mat_type == "absorbing":
-            vocab_file = os.path.join(self.root, 'vocab_mask.json')
-        else:
+        if transition_mat_type == "uniform":
             vocab_file = os.path.join(self.root, 'vocab.json')
+        else:
+            vocab_file = os.path.join(self.root, 'vocab_mask.json')
 
         if os.path.exists(vocab_file):
-            self.vocab.load_json(self.root)
+            self.vocab.load_json(vocab_file)
         else:
             stoi = self._create_stoi()
             self.vocab.fill(stoi)

@@ -91,8 +91,18 @@ def get_diffusion_betas(transition_mat_type, num_timesteps):
         alpha_bar = np.cos((steps + 0.008) / 1.008 * np.pi * 0.5)
         betas = np.minimum(1 - alpha_bar[1:] / alpha_bar[:-1], 0.999)
         return betas
+    elif transition_mat_type == 'uniform-mask':
+        steps = np.arange(num_timesteps + 1, dtype=np.float64) / num_timesteps
+        alpha_bar = np.cos((steps + 0.008) / 1.008 * np.pi * 0.5)
+        betas = np.minimum(1 - alpha_bar[1:] / alpha_bar[:-1], 0.999)
+        return betas
     elif transition_mat_type == 'absorbing':
         return 1. / np.linspace(num_timesteps, 1., num_timesteps)
+    elif transition_mat_type == 'uniform-absorbing':
+        steps = np.arange(num_timesteps + 1, dtype=np.float64) / num_timesteps
+        alpha_bar = np.cos((steps + 0.008) / 1.008 * np.pi * 0.5)
+        betas = np.minimum(1 - alpha_bar[1:] / alpha_bar[:-1], 0.999)
+        return np.array([betas, 1. / np.linspace(num_timesteps, 1., num_timesteps)])
     else:
         raise NotImplementedError(transition_mat_type)
 
@@ -104,7 +114,7 @@ class MultinomialDiffusion(torch.nn.Module):
         super(MultinomialDiffusion, self).__init__()
         assert loss_type in ('kl', 'cross_entropy_x_start', 'hybrid')
         assert parametrization in ('x0', 'direct')
-        assert transition_mat_type in ("uniform", "absorbing")
+        assert transition_mat_type in ("uniform", "absorbing", "uniform-mask", "uniform-absorbing")
 
         self.num_classes = num_classes
         self._denoise_fn = denoise_fn
@@ -129,10 +139,15 @@ class MultinomialDiffusion(torch.nn.Module):
         # Construct transition matrices for q(x_t|x_{t-1}). t goes from {0, ..., T-1}
         if self.transition_mat_type == "uniform":
             q_one_step_mats = [self._get_transition_mat(t) for t in range(self.num_timesteps)]
+        elif self.transition_mat_type == "uniform-mask":
+            q_one_step_mats = [self._get_transition_mat(t) for t in range(self.num_timesteps)]
         elif self.transition_mat_type == "absorbing":
             q_one_step_mats = [self._get_absorbing_transition_mat(t) for t in range(self.num_timesteps)]
+        elif self.transition_mat_type == "uniform-absorbing":
+            q_one_step_mats = [0.5 * self._get_transition_mat(t) + 0.5 * self._get_absorbing_transition_mat(t) 
+                               for t in range(self.num_timesteps)]
         else:
-            raise ValueError(f"transition_mat_type must be 'uniform', 'absorbing', but is {self.transition_mat_type}")
+            raise ValueError(f"transition_mat_type must be 'uniform', 'absorbing', 'uniform-mask', 'uniform-absorbing', but is {self.transition_mat_type}")
 
         self.q_onestep_mats = torch.stack(q_one_step_mats, dim=0)
         assert self.q_onestep_mats.shape == (self.num_timesteps, self.num_classes, self.num_classes)
@@ -172,7 +187,10 @@ class MultinomialDiffusion(torch.nn.Module):
         self.register_buffer('Lt_count', torch.zeros(timesteps))
 
     def _get_full_transition_mat(self, t):
-        beta_t = self.betas[t]
+        if self.transition_mat_type == "uniform-absorbing":
+            beta_t = self.betas[0][t]
+        else:
+            beta_t = self.betas[t]
         mat = torch.full(size=(self.num_classes, self.num_classes),
                          fill_value=beta_t / float(self.num_classes))
         mat[range(self.num_classes), range(self.num_classes)] = 1. - beta_t * (self.num_classes - 1.) / self.num_classes
@@ -183,7 +201,10 @@ class MultinomialDiffusion(torch.nn.Module):
             return self._get_full_transition_mat(t)
 
         # Assumes num_off_diags < num_pixel_vals
-        beta_t = self.betas[t]
+        if self.transition_mat_type == "uniform-absorbing":
+            beta_t = self.betas[0][t]
+        else:
+            beta_t = self.betas[t]
 
         mat = torch.zeros((self.num_classes, self.num_classes))
         off_diag = torch.full(size=(self.num_classes - 1,),
@@ -199,7 +220,10 @@ class MultinomialDiffusion(torch.nn.Module):
         return mat
 
     def _get_absorbing_transition_mat(self, t):
-        beta_t = self.betas[t]
+        if self.transition_mat_type == "uniform-absorbing":
+            beta_t = self.betas[1][t]
+        else:
+            beta_t = self.betas[t]
         diag = torch.full(size=(self.num_classes,), fill_value=1. - beta_t)
         mat = torch.diag(diag, diagonal=0)
         # Add beta_t for the absorbing state.
@@ -280,9 +304,9 @@ class MultinomialDiffusion(torch.nn.Module):
         return model_logits, pred_x_start_logits
 
     @torch.no_grad()
-    def p_sample(self, log_x, t):
-        model_log_prob = self.p_pred(log_x=log_x, t=t)
-        out = self.log_sample_categorical(model_log_prob)
+    def p_sample(self, x, t):
+        model_prob, _ = self.p_pred(x=x, t=t)
+        out = self.sample_categorical(model_prob)
         return out
 
     @torch.no_grad()
@@ -317,12 +341,13 @@ class MultinomialDiffusion(torch.nn.Module):
 
         return img
 
-    def log_sample_categorical(self, logits):
+    def sample_categorical(self, logits):
         uniform = torch.rand_like(logits)
         gumbel_noise = -torch.log(-torch.log(uniform + 1e-30) + 1e-30)
-        sample = (gumbel_noise + logits).argmax(dim=1)
-        log_sample = index_to_log_onehot(sample, self.num_classes)
-        return log_sample
+        sample = (gumbel_noise + logits).argmax(dim=-1)
+        # log_sample = index_to_log_onehot(sample, self.num_classes)
+        # return log_sample
+        return sample
 
     def q_sample(self, x_start, t):
         log_EV_qxt_x0 = torch.log(self.q_pred(x_start, t) + self.eps)
@@ -331,16 +356,16 @@ class MultinomialDiffusion(torch.nn.Module):
         gumbel_noise = -torch.log(-torch.log(uniform + 1e-30) + 1e-30)
         return (gumbel_noise + log_EV_qxt_x0).argmax(dim=-1)
 
-    # def kl_prior(self, log_x_start):
-    #     b = log_x_start.size(0)
-    #     device = log_x_start.device
-    #     ones = torch.ones(b, device=device).long()
+    def kl_prior(self, x_start):
+        b = x_start.size(0)
+        device = x_start.device
+        ones = torch.ones(b, device=device).long()
 
-    #     log_qxT_prob = self.q_pred(log_x_start, t=(self.num_timesteps - 1) * ones)
-    #     log_half_prob = -torch.log(self.num_classes * torch.ones_like(log_qxT_prob))
+        log_qxT_prob = self.q_pred(x_start, t=(self.num_timesteps - 1) * ones)
+        log_half_prob = -torch.log(self.num_classes * torch.ones_like(log_qxT_prob))
 
-    #     kl_prior = self.multinomial_kl(log_qxT_prob, log_half_prob)
-    #     return sum_except_batch(kl_prior)
+        kl_prior = self.multinomial_kl(log_qxT_prob, log_half_prob)
+        return sum_except_batch(kl_prior)
 
     def sample_time(self, b, device, method='uniform'):
         if method == 'importance':
@@ -396,13 +421,13 @@ class MultinomialDiffusion(torch.nn.Module):
         x_t = self.q_sample(x_start=x_start, t=t)
         if self.loss_type == 'kl':
             losses, _ = self.compute_Lt(x_start, x_t, t)
-            losses = losses / pt
+            losses = losses / pt + self.kl_prior(x_start)
         elif self.loss_type == 'cross_entropy_x_start':
             _, pred_x_start_logits = self.p_pred(x=x_t, t=t)
             losses = self.cross_entropy_x_start(x_start=x_start, pred_x_start_logits=pred_x_start_logits)
         elif self.loss_type == 'hybrid':
             vb_losses, pred_x_start_logits = self.compute_Lt(x_start, x_t, t)
-            vb_losses = vb_losses / pt
+            vb_losses = vb_losses / pt + self.kl_prior(x_start)
             ce_losses = self.cross_entropy_x_start(x_start=x_start, pred_x_start_logits=pred_x_start_logits)
             losses = vb_losses + self.hybrid_coeff * ce_losses
         else:
@@ -448,20 +473,22 @@ class MultinomialDiffusion(torch.nn.Module):
         print()
         return log_onehot_to_index(log_z)
 
-    def sample_chain(self, num_samples):
+    def sample_chain(self, transition_mat_type, num_samples):
         b = num_samples
         device = self.log_alpha.device
-        uniform_logits = torch.zeros(
-            (b, self.num_classes) + self.shape, device=device)
+        if transition_mat_type == "uniform":
+            uniform_logits = torch.zeros((b, self.num_classes) + self.shape, device=device)
+            uniform_logits = uniform_logits.permute(0, 2, 1)
+
+            z = self.sample_categorical(uniform_logits)
+        else:
+            z = torch.full((b,) + self.shape, fill_value=self.num_classes - 1, device=device)
 
         zs = torch.zeros((self.num_timesteps, b) + self.shape).long()
-
-        log_z = self.log_sample_categorical(uniform_logits)
         for i in reversed(range(0, self.num_timesteps)):
             print(f'Chain timestep {i:4d}', end='\r')
             t = torch.full((b,), i, device=device, dtype=torch.long)
-            log_z = self.p_sample(log_z, t)
-
-            zs[i] = log_onehot_to_index(log_z)
+            z = self.p_sample(z, t)
+            zs[i] = z
         print()
         return zs

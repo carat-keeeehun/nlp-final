@@ -21,8 +21,7 @@ class Vocab():
         with open(vocab_file, 'w') as f:
             json.dump(self.stoi, f, indent=4)
 
-    def load_json(self, path):
-        vocab_file = os.path.join(path, 'vocab.json')
+    def load_json(self, vocab_file):
         with open(vocab_file, 'r') as f:
             stoi = json.load(f)
         self.fill(stoi)

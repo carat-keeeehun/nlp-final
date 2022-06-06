@@ -34,6 +34,7 @@ parser.add_argument('--double', type=eval, default=False)
 parser.add_argument('--benchmark', type=eval, default=False)
 eval_args = parser.parse_args()
 assert eval_args.length is not None, 'Currently, length has to be specified.'
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 path_args = '{}/args.pickle'.format(eval_args.model)
 path_check = '{}/check/checkpoint.pt'.format(eval_args.model)
@@ -50,7 +51,6 @@ with open(path_args, 'rb') as f:
 ##################
 ## Specify data ##
 ##################
-
 train_loader, eval_loader, data_shape, num_classes = get_data(args)
 
 ###################
@@ -93,7 +93,7 @@ if eval_args.benchmark:
     print(f'Sample time average {np.mean(results):.2f} +/- {np.std(results):.2f}')
     quit()
 
-samples_chain = model.sample_chain(eval_args.samples)
+samples_chain = model.sample_chain(args.diffusion_transition_mat_type, eval_args.samples)
 samples = samples_chain[0]
 # samples = model.sample(eval_args.samples)
 samples_text = train_loader.dataset.vocab.decode(samples.cpu(), lengths.cpu())
@@ -140,7 +140,8 @@ def format_text(batch_text):
 
 
 def draw_text_to_image(text, invert_color=False):
-    font = ImageFont.truetype("CourierPrime-Regular.ttf", 24)
+    # font = ImageFont.truetype("CourierPrime-Regular.ttf", 24)
+    font = ImageFont.truetype("DejaVuSansMono.ttf", 24)
 
     black = (0, 0, 0)
     white = (255, 255, 255)

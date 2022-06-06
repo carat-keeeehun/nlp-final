@@ -29,10 +29,10 @@ def get_data(args):
         valid = Text8Dataset(args.diffusion_transition_mat_type, seq_len=256, split='valid')
         test = Text8Dataset(args.diffusion_transition_mat_type, seq_len=256, split='test')
         data_shape = (256,)
-        if args.diffusion_transition_mat_type == "absorbing":
-            num_classes = 28
-        else:
+        if args.diffusion_transition_mat_type == "uniform":
             num_classes = 27
+        else:
+            num_classes = 28
     elif args.dataset == 'enwik8_blocksparse':
         train = EnWik8Dataset(seq_len=320, split='train', download=True)
         valid = EnWik8Dataset(seq_len=320, split='valid')
